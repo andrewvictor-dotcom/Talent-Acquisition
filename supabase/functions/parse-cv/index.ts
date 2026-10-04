@@ -4,6 +4,8 @@
 //
 // Same resilience as screen-cvs: busy errors (429/5xx) retry with backoff, then fall over
 // to GEMINI_FALLBACK_MODEL or another "flash" model this key can use.
+// v2: also reads the PDF itself and the file's clickable links (mailto:, LinkedIn), and
+// repairs emails split by stray spaces in the extracted text.
 // Sensitive attributes (age, gender, religion, marital status, nationality, photo) are never extracted.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -63,7 +65,11 @@ const PROMPT = [
   "Extract the candidate's details from this CV for a recruiter's form.",
   "Rules:",
   "- Copy values exactly as written in the CV (names, emails, phone numbers, company names). Never invent a value; leave a field out if the CV does not state it.",
+  "- Contact details are usually in the header or a side column, sometimes next to icons. Look there first, in the PDF itself when it is attached.",
+  "- The extracted text can split an email or URL with stray spaces (e.g. 'name @hotmail.com'). Join it back with no spaces.",
+  "- LINKS lists the clickable links in the file: take the email from a mailto: link and the LinkedIn URL from a linkedin.com link.",
   "- phone: one number, digits with an optional leading +, no spaces.",
+  "- city: the city in the contact details; if none, the city of the most recent role. If only a country is given, leave city out and fill country.",
   "- currentTitle / currentEmployer: the most recent role (the one marked present, or the latest dates).",
   "- yearsExperience: total professional experience in years, from the dates of the roles. Leave it out if dates are missing.",
   "- linkedin: the full LinkedIn profile URL if present.",
@@ -149,7 +155,7 @@ async function extract(parts: unknown[]): Promise<{ profile: any; model: string 
 function clean(p: any) {
   const str = (v: unknown, max = 200) => (typeof v === "string" ? v.trim().slice(0, max) : "");
   const list = (v: unknown, max: number) => (Array.isArray(v) ? v.map((x) => str(x, 80)).filter(Boolean).slice(0, max) : []);
-  const email = str(p.email, 120).toLowerCase();
+  const email = str(p.email, 120).replace(/^mailto:/i, "").replace(/\s+/g, "").toLowerCase();
   const phone = str(p.phone, 30).replace(/[^\d+]/g, "");
   let linkedin = str(p.linkedin, 200);
   if (linkedin && !/linkedin\.com/i.test(linkedin)) linkedin = "";
@@ -196,16 +202,29 @@ Deno.serve(async (req) => {
   const text = String(body?.text ?? "").trim().slice(0, MAX_CHARS);
   const fileB64 = typeof body?.fileBase64 === "string" ? body.fileBase64 : "";
   const mime = body?.mimeType === "application/pdf" ? "application/pdf" : "";
+  const links: string[] = (Array.isArray(body?.links) ? body.links : [])
+    .map((u: unknown) => String(u ?? "").trim().slice(0, 300)).filter(Boolean).slice(0, 20);
   if (!text && !(fileB64 && mime)) return json({ error: "Send the CV text or the PDF file" }, 400);
   if (fileB64.length > MAX_FILE_B64) return json({ error: "File too large" }, 413);
 
   const parts: unknown[] = [{ text: PROMPT }];
   if (fileB64 && mime) parts.push({ inline_data: { mime_type: mime, data: fileB64 } });
   if (text) parts.push({ text: "CV TEXT:\n" + text });
+  if (links.length) parts.push({ text: "LINKS:\n" + links.join("\n") });
 
   try {
     const { profile, model } = await extract(parts);
-    return json({ ok: true, model, profile: clean(profile ?? {}) });
+    const out = clean(profile ?? {});
+    if (!out.email) {
+      const m = links.find((u) => /^mailto:/i.test(u));
+      const e = m ? m.replace(/^mailto:/i, "").split("?")[0].trim().toLowerCase() : "";
+      if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) out.email = e;
+    }
+    if (!out.linkedin) {
+      const l = links.find((u) => /linkedin\.com\/(in|pub)\//i.test(u));
+      if (l) out.linkedin = /^https?:\/\//i.test(l) ? l : "https://" + l;
+    }
+    return json({ ok: true, model, profile: out });
   } catch (e) {
     return json({ error: String((e as Error).message).slice(0, 300) }, 502);
   }
