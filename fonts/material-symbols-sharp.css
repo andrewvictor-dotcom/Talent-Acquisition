@@ -1,0 +1,10 @@
+/* Material Symbols Sharp, self-hosted (static instance: opsz 24, wght 400, FILL 0, GRAD 0).
+   Served from this site so the icons never depend on fonts.googleapis.com being reachable.
+   Source: Google Material Symbols (Apache 2.0), via the material-symbols npm package. */
+@font-face {
+  font-family: "Material Symbols Sharp";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("material-symbols-sharp.woff2") format("woff2");
+}
